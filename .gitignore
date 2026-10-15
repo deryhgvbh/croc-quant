@@ -1,0 +1,5 @@
+.venv/
+data_cache/
+streamlit.log
+__pycache__/
+*.pyc
