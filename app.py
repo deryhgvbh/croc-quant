@@ -22,16 +22,29 @@ from croc.indicators import alligator, ao, macd
 from croc.strategy import position, sub_signals
 from croc.backtest import run_single, run_portfolio, metrics, trade_stats
 from croc.rotation import rotation_weights
-from croc.universe import DEFAULT_POOL, EXTRA_POOL, BOND_ETF
+from croc.universe import DEFAULT_POOL, EXTRA_POOL, BOND_ETF, DEFENSIVE_POOL
+from croc import board as gator
 
 st.set_page_config(page_title="鳄鱼派量化", page_icon="🐊", layout="wide")
 
-NAMES = {**DEFAULT_POOL, **EXTRA_POOL, **BOND_ETF}
+NAMES = {**DEFAULT_POOL, **EXTRA_POOL, **BOND_ETF, **DEFENSIVE_POOL}
+
+GRADE_COLOR = {"S": "#00c853", "A": "#64dd17", "B": "#ffab00", "C": "#d50000"}
 
 
 @st.cache_data(ttl=3600, show_spinner="拉取行情数据…")
 def load(symbols, refresh=False):
     return get_pool(list(symbols), refresh=refresh)
+
+
+@st.cache_data(ttl=3600, show_spinner="计算评分看板…")
+def load_board(pick_key, def_key, refresh=False):
+    """宽基池+三剑客数据 -> 评分看板(df含score/grade/因子分)。"""
+    data = get_pool(list(pick_key), refresh=refresh)
+    def_data = get_pool(list(def_key), refresh=refresh)
+    margin = gator.margin_balance()
+    scores = gator.factor_scores(data, margin)
+    return gator.composite(scores), data, def_data
 
 
 def state_label(row):
@@ -48,7 +61,7 @@ def fmt_sig(v):
 
 # ---------- 侧边栏：标的池与参数 ----------
 st.sidebar.title("🐊 鳄鱼派量化")
-page = st.sidebar.radio("页面", ["今日信号", "行情与鳄鱼线", "回测"])
+page = st.sidebar.radio("页面", ["今日信号", "评分看板", "行情与鳄鱼线", "回测"])
 
 st.sidebar.markdown("---")
 st.sidebar.subheader("ETF 池")
@@ -107,23 +120,112 @@ if page == "今日信号":
     st.dataframe(tbl, use_container_width=True, hide_index=True)
 
     st.subheader("📋 今日应持仓")
-    mode = st.radio("轮动方式", ["equal", "top"], horizontal=True,
-                    format_func=lambda m: {"equal": "看多者等权", "top": "最强动量单吊"}[m])
-    w = rotation_weights({s: data[s] for s in picked if s in data},
-                         bond_symbol=bond_sym, mode=mode, zero_band=zero_band)
-    last_w = w.iloc[-1]
-    hold = last_w[last_w > 0]
-    if len(hold) == 0:
-        st.info("今日无任何持仓信号")
+    c_a, c_b = st.columns(2)
+    with c_a:
+        st.markdown("**① 鳄鱼线系统**（Alligator+AO+分形+MACD 机械择时）")
+        mode = st.radio("轮动方式", ["equal", "top"], horizontal=True,
+                        format_func=lambda m: {"equal": "看多者等权", "top": "最强动量单吊"}[m])
+        w = rotation_weights({s: data[s] for s in picked if s in data},
+                             bond_symbol=bond_sym, mode=mode, zero_band=zero_band)
+        last_w = w.iloc[-1]
+        hold = last_w[last_w > 0]
+        if len(hold) == 0:
+            st.info("无任何持仓信号")
+        else:
+            for s, weight in hold.items():
+                st.success(f"**{s} {NAMES.get(s, s)}** — {weight:.0%}")
+        with st.expander("近10日权重变化"):
+            st.dataframe(w.tail(10).round(2), use_container_width=True)
+
+    with c_b:
+        st.markdown("**② 评分看板系统**（鳄鱼派风格：评级定仓位+三剑客防守）")
+        bdf, bdata, def_data = load_board(tuple(picked), tuple(DEFENSIVE_POOL.keys()), refresh)
+        last = bdf.iloc[-1]
+        grade = last["grade"]
+        st.metric("今日评级", grade, f"得分 {last['score']:.0f}/100")
+        bw = gator.board_weights(bdata, def_data, bdf)
+        lhold = bw.iloc[-1][bw.iloc[-1] > 0]
+        if len(lhold) == 0:
+            st.info("无持仓")
+        else:
+            tag = {"S": "强市满仓进攻", "A": "强势进攻", "B": "半仓+半防守", "C": "全躲三剑客"}[grade]
+            st.caption(f"{grade}级 → {tag}")
+            for s, weight in lhold.items():
+                st.success(f"**{s} {NAMES.get(s, s)}** — {weight:.0%}")
+
+
+# ---------- 页2：评分看板 ----------
+elif page == "评分看板":
+    st.title("📊 大盘评分看板（鳄鱼派风格）")
+    st.caption("仿「像鳄鱼一样思考」评分看板：多因子加权打分定 S/A/B/C 级，"
+               "评级决定仓位松紧，弱市(C)躲进三剑客（红利/黄金/国债）。"
+               "确切配方未公开，此为公开数据的神似实现。")
+
+    bdf, bdata, def_data = load_board(tuple(picked), tuple(DEFENSIVE_POOL.keys()), refresh)
+    last = bdf.iloc[-1]
+    grade = last["grade"]
+
+    g1, g2, g3 = st.columns([1, 2, 2])
+    g1.metric("今日评级", grade, f"得分 {last['score']:.0f}/100")
+    factor_cols = {"trend": "趋势宽度", "mom": "动量", "vol": "量能",
+                   "breadth": "价格宽度", "margin": "两融趋势"}
+    g2.markdown("**因子得分**")
+    for k, label in factor_cols.items():
+        if k in bdf.columns:
+            g2.progress(int(last[k]) / 100,
+                        text=f"{label}: {last[k]:.0f}")
+    snap = gator.activity_snapshot()
+    if snap:
+        g3.markdown("**市场快照（乐咕）**")
+        g3.dataframe(pd.DataFrame(list(snap.items()),
+                                  columns=["项目", "值"]).set_index("项目"),
+                     use_container_width=True)
+
+    # 评分历史（最近250日）
+    days = st.slider("显示最近N日", 60, 750, 250, key="board_days")
+    bd = bdf.tail(days)
+    fig = make_subplots(rows=2, cols=1, shared_xaxes=True,
+                        row_heights=[0.65, 0.35], vertical_spacing=0.05,
+                        subplot_titles=("综合评分与评级", "因子得分"))
+    fig.add_trace(go.Scatter(x=bd.index, y=bd["score"], name="综合评分",
+                             line=dict(color="#2ca02c", width=1.8)), row=1, col=1)
+    for th, lab in [(78, "S线"), (62, "A线"), (45, "B线")]:
+        fig.add_hline(y=th, line_dash="dot", line_color="#999", row=1, col=1,
+                      annotation_text=lab)
+    # 评级背景色
+    seg_start, cur = None, None
+    for i, g in enumerate(bd["grade"]):
+        if g != cur:
+            if seg_start is not None:
+                fig.add_vrect(x0=seg_start, x1=bd.index[i - 1],
+                              fillcolor=GRADE_COLOR[cur], opacity=0.10,
+                              line_width=0, row=1, col=1)
+            seg_start, cur = bd.index[i], g
+    if seg_start is not None:
+        fig.add_vrect(x0=seg_start, x1=bd.index[-1], fillcolor=GRADE_COLOR[cur],
+                      opacity=0.10, line_width=0, row=1, col=1)
+    for k, label in factor_cols.items():
+        if k in bd.columns:
+            fig.add_trace(go.Scatter(x=bd.index, y=bd[k], name=label,
+                                     line=dict(width=1)), row=2, col=1)
+    fig.update_layout(height=620, margin=dict(l=10, r=10, t=40, b=10))
+    st.plotly_chart(fig, use_container_width=True)
+
+    st.subheader("💰 板块资金流（今日主力净流入）")
+    ff = gator.sector_fundflow()
+    if len(ff):
+        st.dataframe(ff.head(15), use_container_width=True, hide_index=True)
     else:
-        for s, weight in hold.items():
-            st.success(f"**{s} {NAMES.get(s, s)}** — 权重 {weight:.0%}")
+        st.info("板块资金流接口暂不可用")
 
-    with st.expander("近10日权重变化"):
-        st.dataframe(w.tail(10).round(2), use_container_width=True)
+    st.subheader("🛡️ 三剑客（防守资产）")
+    for s, name in DEFENSIVE_POOL.items():
+        df = def_data.get(s)
+        if df is not None and len(df):
+            st.write(f"- **{s} {name}** 最新收盘 {df['close'].iloc[-1]:.3f}")
 
 
-# ---------- 页2：行情与鳄鱼线 ----------
+# ---------- 页3：行情与鳄鱼线 ----------
 elif page == "行情与鳄鱼线":
     st.title("📈 行情与鳄鱼线")
     sym = st.selectbox("标的", list(dict.fromkeys(picked + [bond_sym])),
@@ -195,7 +297,7 @@ elif page == "行情与鳄鱼线":
 # ---------- 页3：回测 ----------
 else:
     st.title("🧪 回测")
-    tab1, tab2 = st.tabs(["单标的择时", "ETF池轮动"])
+    tab1, tab2, tab3 = st.tabs(["单标的择时", "ETF池轮动", "评分看板策略"])
 
     with tab1:
         sym = st.selectbox("标的", list(dict.fromkeys(picked + [bond_sym])),
@@ -295,5 +397,47 @@ else:
             st.dataframe(w.iloc[-1][w.iloc[-1] > 0].to_frame("权重"),
                          use_container_width=True)
 
+    with tab3:
+        st.caption("鳄鱼派风格：评级定仓位——A/S 满仓动量最强的宽基、"
+                   "B 半仓+半三剑客、C 全躲三剑客（红利/黄金/国债）。")
+        bdf, bdata, def_data = load_board(tuple(picked), tuple(DEFENSIVE_POOL.keys()), refresh)
+        mom_n3 = st.slider("动量窗口(日)", 5, 60, 20, key="mom3")
+        bw = gator.board_weights(bdata, def_data, bdf, momentum_n=mom_n3)
+        all_d = {**bdata, **def_data}
+        mat = prices_matrix(all_d)
+        bw = bw.reindex(mat.index).ffill().fillna(0)
+        res3 = run_portfolio(mat, bw, exec_price=exec_price, fee=fee)
+        m3 = metrics(res3["nav"], res3["ret"])
+
+        c1, c2, c3, c4 = st.columns(4)
+        c1.metric("年化收益", f"{m3['年化收益']:.1%}")
+        c2.metric("最大回撤", f"{m3['最大回撤']:.1%}")
+        c3.metric("夏普", f"{m3['夏普比率']:.2f}")
+        c4.metric("卡玛", f"{m3['卡玛比率']:.2f}")
+
+        fig3 = make_subplots(rows=2, cols=1, shared_xaxes=True,
+                             row_heights=[0.7, 0.3], vertical_spacing=0.04,
+                             subplot_titles=("净值", "评级"))
+        fig3.add_trace(go.Scatter(x=res3.index, y=res3["nav"], name="评分策略",
+                                  line=dict(color="#2ca02c", width=1.8)), row=1, col=1)
+        eq = mat[picked[0]] if picked else mat.iloc[:, 0]
+        bch = eq / eq.iloc[0]
+        fig3.add_trace(go.Scatter(x=bch.index, y=bch, name=f"{NAMES.get(picked[0],'基准')}",
+                                  line=dict(color="#888", width=1)), row=1, col=1)
+        gmap = {"S": 4, "A": 3, "B": 2, "C": 1}
+        gl = bdf["grade"].reindex(res3.index).ffill().map(gmap)
+        fig3.add_trace(go.Scatter(x=res3.index, y=gl, name="评级(S=4..C=1)",
+                                  line=dict(color="#ffab00", width=1),
+                                  fill="tozeroy"), row=2, col=1)
+        fig3.update_layout(height=520, margin=dict(l=10, r=10, t=40, b=10))
+        st.plotly_chart(fig3, use_container_width=True)
+
+        grade_dist = bdf["grade"].value_counts()
+        st.write("历史评级分布：" +
+                 "　".join(f"{g}级 {grade_dist.get(g, 0)}天" for g in ["S", "A", "B", "C"]))
+        with st.expander("当前权重"):
+            st.dataframe(bw.iloc[-1][bw.iloc[-1] > 0].to_frame("权重"),
+                         use_container_width=True)
+
 st.sidebar.markdown("---")
-st.sidebar.caption("策略：鳄鱼线(Alligator)+AO+分形+MACD\n\n信号体系：招商证券量化技术分析系列\n\n⚠️ 仅供研究，不构成投资建议")
+st.sidebar.caption("① 鳄鱼线(Alligator)+AO+分形+MACD：招商证券研报体系\n\n② 评分看板：仿「像鳄鱼一样思考」S/A/B/C评级+三剑客防守\n\n⚠️ 仅供研究，不构成投资建议")
