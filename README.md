@@ -80,3 +80,12 @@ data_cache/     本地数据缓存（自动增量更新）
 2. 下载本仓库（Code → Download ZIP）解压，或 `git clone`
 3. Windows 双击 `启动看板.bat`；macOS/Linux 终端跑 `bash 启动看板.sh`
 4. 浏览器自动打开 http://localhost:8501，收盘后看「今日信号」
+
+## 云端部署（Streamlit Community Cloud，免费，手机也能看）
+
+1. 打开 https://share.streamlit.io 用 GitHub 登录
+2. New app → 选 `deryhgvbh/croc-quant` → Main file `app.py` → Deploy
+3. 部署完得到一个网址（如 croc-quant-xxx.streamlit.app），收藏即可，手机浏览器也能开
+
+注意：首次启动要从头拉20年行情，约1-2分钟；免费版闲置会休眠，打开时自动唤醒。
+云端每次冷启动重新拉数（磁盘不持久），akshare 三级降级保证可用。

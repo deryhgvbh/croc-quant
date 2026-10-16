@@ -98,6 +98,24 @@ if page == "今日信号":
         st.error("数据拉取失败")
         st.stop()
 
+    # 先算两套系统的今日结论，置顶一行看懂
+    w_alli = rotation_weights({s: data[s] for s in picked if s in data},
+                              bond_symbol=bond_sym, mode="equal", zero_band=zero_band)
+    hold_alli = w_alli.iloc[-1]
+    hold_alli = hold_alli[hold_alli > 0]
+    bdf, bdata, def_data = load_board(tuple(picked), tuple(DEFENSIVE_POOL.keys()), refresh)
+    bw_today = gator.board_weights(bdata, def_data, bdf).iloc[-1]
+    hold_bd = bw_today[bw_today > 0]
+    grade_today = bdf.iloc[-1]["grade"]
+
+    def _fmt_hold(h):
+        return "、".join(f"{NAMES.get(s, s)} {v:.0%}" for s, v in h.items()) or "空仓"
+
+    d_last = max(df.index[-1] for df in data.values() if len(df))
+    st.info(f"📣 **今日结论（{d_last:%m-%d} 收盘）**\n\n"
+            f"① 鳄鱼线系统 → **{_fmt_hold(hold_alli)}**\n\n"
+            f"② 评分看板 → **{grade_today}级**（{bdf.iloc[-1]['score']:.0f}分）→ {_fmt_hold(hold_bd)}")
+
     rows = []
     for s in syms:
         df = data.get(s)
@@ -139,12 +157,10 @@ if page == "今日信号":
 
     with c_b:
         st.markdown("**② 评分看板系统**（鳄鱼派风格：评级定仓位+三剑客防守）")
-        bdf, bdata, def_data = load_board(tuple(picked), tuple(DEFENSIVE_POOL.keys()), refresh)
         last = bdf.iloc[-1]
         grade = last["grade"]
         st.metric("今日评级", grade, f"得分 {last['score']:.0f}/100")
-        bw = gator.board_weights(bdata, def_data, bdf)
-        lhold = bw.iloc[-1][bw.iloc[-1] > 0]
+        lhold = hold_bd
         if len(lhold) == 0:
             st.info("无持仓")
         else:
