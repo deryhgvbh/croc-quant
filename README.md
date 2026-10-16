@@ -73,3 +73,10 @@ data_cache/     本地数据缓存（自动增量更新）
 - 数据源的"后复权"价格用于回测；行情页显示价与实价可能有因子差，收益序列不受影响。
 - 东财接口对频繁请求会限流，已做退避重试 + 双源降级；实在不通时删 data_cache 重试。
 - ⚠️ 仅供研究，不构成投资建议。实盘需自行接券商（QMT/PTrade），本软件只做信号与回测。
+
+## 本地运行（自己的电脑）
+
+1. 装 Python 3.10+（官网 python.org，安装时勾选 "Add to PATH"）
+2. 下载本仓库（Code → Download ZIP）解压，或 `git clone`
+3. Windows 双击 `启动看板.bat`；macOS/Linux 终端跑 `bash 启动看板.sh`
+4. 浏览器自动打开 http://localhost:8501，收盘后看「今日信号」
