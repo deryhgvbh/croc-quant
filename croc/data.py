@@ -5,11 +5,17 @@
 压缩到 ~0.005 量级（脏数据），hfq 早期保持真实价格、后期累乘，回测不受此影响。
 缓存按 symbol 存 data_cache/{symbol}.parquet，增量更新。
 """
+import socket
 import time
 from pathlib import Path
 
 import akshare as ak
 import pandas as pd
+
+# 全局套接字超时：云端(海外)访问东财常直接不通，避免单请求无界挂死
+socket.setdefaulttimeout(20)
+
+_em_dead = False  # 东财熔断：一只标的重试仍失败后，本进程后续直接走备用源
 
 CACHE_DIR = Path(__file__).resolve().parent.parent / "data_cache"
 
@@ -50,9 +56,10 @@ def _bs_code(symbol: str) -> str:
     return ("sh." if symbol.startswith("5") else "sz.") + symbol
 
 
-def _fetch_baostock(symbol: str, start: str) -> pd.DataFrame:
+def _fetch_baostock(symbol: str, start: str, logged_in: bool = False) -> pd.DataFrame:
     import baostock as bs
-    bs.login()
+    if not logged_in:
+        bs.login()
     try:
         rs = bs.query_history_k_data_plus(
             _bs_code(symbol), "date,open,high,low,close,volume,amount",
@@ -62,7 +69,8 @@ def _fetch_baostock(symbol: str, start: str) -> pd.DataFrame:
         while rs.next():
             rows.append(rs.get_row_data())
     finally:
-        bs.logout()
+        if not logged_in:
+            bs.logout()
     df = pd.DataFrame(rows, columns=["date", "open", "high", "low", "close", "volume", "amount"])
     return _norm(df)
 
@@ -74,25 +82,33 @@ def _fetch_sina(symbol: str, start: str) -> pd.DataFrame:
     return df[df.index >= pd.to_datetime(start)]
 
 
-def _fetch(symbol: str, start: str = "20050101", retries: int = 4) -> pd.DataFrame:
-    """东财优先，失败退避后依次降级到 baostock / 新浪。"""
-    for i in range(retries):
-        try:
-            return _fetch_em(symbol, start)
-        except Exception as e:
-            last_err = e
-            time.sleep(1.5 * (i + 1))
-    print(f"[data] {symbol} eastmoney failed({last_err}), trying baostock")
+def _fetch(symbol: str, start: str = "20050101", retries: int = 2,
+             bs_logged_in: bool = False) -> pd.DataFrame:
+    """东财优先，失败退避后依次降级到 baostock / 新浪。
+
+    东财连续失败后熔断：本进程后续标的直接走 baostock（云端海外环境常见）。
+    """
+    global _em_dead
+    if not _em_dead:
+        last_err = None
+        for i in range(retries):
+            try:
+                return _fetch_em(symbol, start)
+            except Exception as e:
+                last_err = e
+                time.sleep(1.5 * (i + 1))
+        _em_dead = True
+        print(f"[data] {symbol} eastmoney failed({last_err}), circuit open -> baostock")
     try:
-        return _fetch_baostock(symbol, start)
+        return _fetch_baostock(symbol, start, logged_in=bs_logged_in)
     except Exception as e:
-        last_err = e
         print(f"[data] {symbol} baostock failed({e}), trying sina")
     return _fetch_sina(symbol, start)
 
 
 def get_etf(symbol: str, refresh: bool = False,
-            cache_dir: Path = CACHE_DIR) -> pd.DataFrame:
+            cache_dir: Path = CACHE_DIR,
+            bs_logged_in: bool = False) -> pd.DataFrame:
     """取某只ETF的后复权日线；有缓存则增量更新。"""
     cache_dir.mkdir(exist_ok=True)
     path = cache_dir / f"{symbol}.parquet"
@@ -105,7 +121,7 @@ def get_etf(symbol: str, refresh: bool = False,
     if cached is not None and len(cached):
         start = (cached.index[-1] + pd.Timedelta(days=1)).strftime("%Y%m%d")
         try:
-            new = _fetch(symbol, start)
+            new = _fetch(symbol, start, bs_logged_in=bs_logged_in)
         except Exception:
             new = pd.DataFrame()
         if len(new):
@@ -115,20 +131,26 @@ def get_etf(symbol: str, refresh: bool = False,
             df.to_parquet(path)
             return df
         return cached
-    df = _fetch(symbol)
+    df = _fetch(symbol, bs_logged_in=bs_logged_in)
     if len(df):
         df.to_parquet(path)
     return df
 
 
 def get_pool(symbols: list[str], refresh: bool = False) -> dict[str, pd.DataFrame]:
+    """批量拉取；baostock 整批共享一次登录。"""
+    import baostock as bs
+    bs.login()
     out = {}
-    for s in symbols:
-        try:
-            out[s] = get_etf(s, refresh=refresh)
-        except Exception as e:
-            print(f"[data] {s} fetch failed: {e}")
-        time.sleep(0.6)  # 限流
+    try:
+        for s in symbols:
+            try:
+                out[s] = get_etf(s, refresh=refresh, bs_logged_in=True)
+            except Exception as e:
+                print(f"[data] {s} fetch failed: {e}")
+            time.sleep(0.3)  # 限流
+    finally:
+        bs.logout()
     return out
 
 
